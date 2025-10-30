@@ -6,12 +6,12 @@ import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
 
 /*
-  SimpleBNBStaking (self-custodied)
+  SimpleBNBStaking (self-custodied, owner emergency)
   - Users deposit arbitrary amounts of native BNB.
   - Contract records per-user deposited amount.
   - BNB stays in this contract; no forwarding to other contracts.
-  - Users can withdraw or emergency-withdraw their balance.
-  - Owner can pause/unpause.
+  - Users can withdraw normally when not paused.
+  - Only the owner can perform an emergency withdrawal to recover all contract funds.
 */
 
 contract SimpleBNBStaking is Ownable2Step, ReentrancyGuard, Pausable {
@@ -22,11 +22,12 @@ contract SimpleBNBStaking is Ownable2Step, ReentrancyGuard, Pausable {
     // --- events ---
     event Deposit(address indexed account, uint256 amountWei);
     event Withdraw(address indexed account, uint256 amountWei);
-    event EmergencyWithdraw(address indexed account, uint256 amountWei);
+    event EmergencyOwnerWithdraw(address indexed to, uint256 amountWei);
 
     // --- errors ---
     error ZeroAmount();
     error InsufficientBalance();
+    error NoFunds();
 
     constructor() Ownable(msg.sender) {}
 
@@ -76,21 +77,21 @@ contract SimpleBNBStaking is Ownable2Step, ReentrancyGuard, Pausable {
         withdraw(depositedWei[msg.sender]);
     }
 
-    // always let users exit
-    function emergencyWithdraw() external nonReentrant {
-        uint256 balanceWei = depositedWei[msg.sender];
-        if (balanceWei == 0) revert InsufficientBalance();
+    // --- owner emergency recovery ---
+    function emergencyWithdraw(address payable to) external onlyOwner nonReentrant {
+        uint256 balance = address(this).balance;
+        if (balance == 0) revert NoFunds();
 
-        depositedWei[msg.sender] = 0;
-        totalDepositedWei -= balanceWei;
+        // reset accounting
+        totalDepositedWei = 0;
 
-        (bool ok, ) = msg.sender.call{value: balanceWei}("");
+        (bool ok, ) = to.call{value: balance}("");
         require(ok, "SEND_FAIL");
 
-        emit EmergencyWithdraw(msg.sender, balanceWei);
+        emit EmergencyOwnerWithdraw(to, balance);
     }
 
-    // force deposits through the function
+    // --- receive guards ---
     receive() external payable { revert("USE_DEPOSIT"); }
     fallback() external payable { revert("NO_FALLBACK"); }
 }
