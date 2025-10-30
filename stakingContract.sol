@@ -5,95 +5,92 @@ import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
 
-contract AccessStakeBNB is Ownable2Step, ReentrancyGuard, Pausable {
-    uint256 public minStakeWei = 5_000_000_000_000_000; // 0.005 BNB
-    mapping(address => uint256) public escrowedWei;
-    uint256 public totalEscrowedWei;
+/*
+  SimpleBNBStaking (self-custodied)
+  - Users deposit arbitrary amounts of native BNB.
+  - Contract records per-user deposited amount.
+  - BNB stays in this contract; no forwarding to other contracts.
+  - Users can withdraw or emergency-withdraw their balance.
+  - Owner can pause/unpause.
+*/
 
+contract SimpleBNBStaking is Ownable2Step, ReentrancyGuard, Pausable {
+    // --- state ---
+    mapping(address => uint256) public depositedWei; // user -> deposited BNB (wei)
+    uint256 public totalDepositedWei;
+
+    // --- events ---
     event Deposit(address indexed account, uint256 amountWei);
     event Withdraw(address indexed account, uint256 amountWei);
     event EmergencyWithdraw(address indexed account, uint256 amountWei);
-    event Activated(address indexed account);
-    event Deactivated(address indexed account);
-    event MinStakeUpdated(uint256 newMinStakeWei);
 
+    // --- errors ---
     error ZeroAmount();
-    error InsufficientEscrow();
+    error InsufficientBalance();
 
     constructor() Ownable(msg.sender) {}
 
-    function setMinStakeWei(uint256 newMinStakeWei) external onlyOwner {
-        minStakeWei = newMinStakeWei;
-        emit MinStakeUpdated(newMinStakeWei);
-    }
-
+    // --- admin ---
     function pause() external onlyOwner { _pause(); }
     function unpause() external onlyOwner { _unpause(); }
 
-    function isActive(address account) public view returns (bool) {
-        return escrowedWei[account] >= minStakeWei;
-    }
-
-    function minBnbWeiRequired() external view returns (uint256) {
-        return minStakeWei;
+    // --- views ---
+    function getDeposited(address account) external view returns (uint256) {
+        return depositedWei[account];
     }
 
     function accountSnapshot(address account)
         external
         view
-        returns (uint256 balanceWei, uint256 requiredMinStakeWei, bool active)
+        returns (uint256 balanceWei)
     {
-        balanceWei = escrowedWei[account];
-        requiredMinStakeWei = minStakeWei;
-        active = balanceWei >= requiredMinStakeWei;
+        balanceWei = depositedWei[account];
     }
 
+    // --- user actions ---
     function deposit() external payable whenNotPaused nonReentrant {
         if (msg.value == 0) revert ZeroAmount();
-        bool wasActive = isActive(msg.sender);
 
-        escrowedWei[msg.sender] += msg.value;
-        totalEscrowedWei += msg.value;
+        depositedWei[msg.sender] += msg.value;
+        totalDepositedWei += msg.value;
+
         emit Deposit(msg.sender, msg.value);
-
-        bool nowActive = isActive(msg.sender);
-        if (nowActive && !wasActive) emit Activated(msg.sender);
     }
 
     function withdraw(uint256 withdrawAmountWei) public whenNotPaused nonReentrant {
         if (withdrawAmountWei == 0) revert ZeroAmount();
-        uint256 prev = escrowedWei[msg.sender];
-        if (prev < withdrawAmountWei) revert InsufficientEscrow();
-        bool wasActive = prev >= minStakeWei;
 
-        escrowedWei[msg.sender] = prev - withdrawAmountWei;
-        totalEscrowedWei -= withdrawAmountWei;
+        uint256 currentBalance = depositedWei[msg.sender];
+        if (currentBalance < withdrawAmountWei) revert InsufficientBalance();
+
+        depositedWei[msg.sender] = currentBalance - withdrawAmountWei;
+        totalDepositedWei -= withdrawAmountWei;
 
         (bool ok, ) = msg.sender.call{value: withdrawAmountWei}("");
         require(ok, "SEND_FAIL");
+
         emit Withdraw(msg.sender, withdrawAmountWei);
-
-        bool nowActive = isActive(msg.sender);
-        if (!nowActive && wasActive) emit Deactivated(msg.sender);
     }
 
-    function withdrawAll() external { withdraw(escrowedWei[msg.sender]); }
+    function withdrawAll() external {
+        withdraw(depositedWei[msg.sender]);
+    }
 
+    // always let users exit
     function emergencyWithdraw() external nonReentrant {
-        uint256 bal = escrowedWei[msg.sender];
-        if (bal == 0) revert InsufficientEscrow();
-        bool wasActive = bal >= minStakeWei;
+        uint256 balanceWei = depositedWei[msg.sender];
+        if (balanceWei == 0) revert InsufficientBalance();
 
-        escrowedWei[msg.sender] = 0;
-        totalEscrowedWei -= bal;
+        depositedWei[msg.sender] = 0;
+        totalDepositedWei -= balanceWei;
 
-        (bool ok, ) = msg.sender.call{value: bal}("");
+        (bool ok, ) = msg.sender.call{value: balanceWei}("");
         require(ok, "SEND_FAIL");
-        emit EmergencyWithdraw(msg.sender, bal);
 
-        if (wasActive) emit Deactivated(msg.sender);
+        emit EmergencyWithdraw(msg.sender, balanceWei);
     }
 
+    // force deposits through the function
     receive() external payable { revert("USE_DEPOSIT"); }
     fallback() external payable { revert("NO_FALLBACK"); }
 }
